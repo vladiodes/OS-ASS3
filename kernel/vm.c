@@ -307,32 +307,25 @@ void uvmfree(pagetable_t pagetable, uint64 sz)
 int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
-  uint64 pa, i;
-  uint flags;
+  uint64 i, pa;
 
   for (i = 0; i < sz; i += PGSIZE)
   {
+
     if ((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if ((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
 
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
 
     // if the page had writing access - we update the flags accordingly
     // setting the cow bit and removing write bit
     if (*pte & PTE_W)
-    {
-      flags |= PTE_COW;
-      flags &= (~PTE_W);
-      *pte |= flags;
-    }
+      *pte = (*pte | PTE_COW) & ~PTE_W;
 
     if (mappages(new, i, PGSIZE, pa, (uint)PTE_FLAGS(*pte)) < 0)
-    {
       goto err;
-    }
 
     inc_ref(pa);
   }
@@ -358,44 +351,46 @@ void uvmclear(pagetable_t pagetable, uint64 va)
 // returns -1 on error
 // returns 1 if the page isn't cow - no need to make addition changes
 // returns 0 if a violation of cow happend and copied all what is needed
-int copy_on_write_or_leave_as_it_is(pagetable_t pagetable, uint64 va)
+
+// this function receivs a pagetable and a virtual address
+// it looks for the pte that matches the virtual address
+// if the pte isn't set as a copy on write page, simply returns 1 and does nothing (as we can write without problems)
+// if the page is set as copy on write, then we allocate a new page, copy the prev page and set the flags accordingly.
+int copy_on_write(pagetable_t pagetable, uint64 va)
 {
+  va = PGROUNDDOWN(va);
   pte_t *pte;
   char *new_pa;
 
   if (va >= MAXVA)
     return -1;
 
+  // looking for the matching pte according to the virtual address
   pte = walk(pagetable, va, 0);
   if (!pte)
     return -1;
-
-  // page isn't valid
+  // invalid pte = error...
   if (!(*pte & PTE_V))
     return -1;
 
-  // pte isn't cow
+  // not a cow page - it's ok.
   if (!(*pte & PTE_COW))
     return 1;
 
-  // otherwise the faulted page occured because of an attempt to write on a cow page
-
-  // allocating a new physical page, copying all content and setting updated flags
+  // otherwise, we have a cow page, so we need to copy it!
   if ((new_pa = kalloc()))
   {
-    uint64 pa = PTE2PA(*pte);
-    // copying to new allocated page the previous page
-    memmove(new_pa, (void *)pa, PGSIZE);
+    uint64 old_pa = PTE2PA(*pte);
+    memmove(new_pa, (char *)old_pa, PGSIZE);
 
-    // updating flags
     uint flags = PTE_FLAGS(*pte);
-    flags |= PTE_W;
-    flags &= (~PTE_COW);
-    // updating page table entry
-    *pte = PA2PTE(new_pa) | flags;
+    flags |= PTE_W;                // turning on write bit
+    flags &= (~PTE_COW);           // turning off cow bit
+    *pte = PA2PTE(new_pa) | flags; // updating new physical address with updated flags (no cow bit, with write bit)
 
     // decrementing ref count on previous physical address (or freeing if ref count=0)
-    kfree((void *)pa);
+    // as the current proccess that copied the page isn't pointing at it anymore!
+    kfree((void *)old_pa);
 
     return 0;
   }
@@ -408,6 +403,7 @@ int copy_on_write_or_leave_as_it_is(pagetable_t pagetable, uint64 va)
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
+// if the page is a cow page, then a new page will be allocated!
 int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
@@ -415,9 +411,12 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while (len > 0)
   {
     va0 = PGROUNDDOWN(dstva);
-    // fails only if not valid or any strange
-    if (copy_on_write_or_leave_as_it_is(pagetable, va0) == -1)
+    // stops function only if fails
+    // if cow is needed, it will be done. if not - it won't be done
+    if (copy_on_write(pagetable, va0) < 0)
       return -1;
+
+    // after handling cow correctly, we continue as before...
 
     pa0 = walkaddr(pagetable, va0);
     if (pa0 == 0)

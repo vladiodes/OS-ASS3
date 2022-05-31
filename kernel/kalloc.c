@@ -98,6 +98,7 @@ kalloc(void)
   return (void *)r;
 }
 
+// increments the ref count of procs pointing at pa, returning the new ref count.
 int inc_ref(uint64 pa)
 {
   int old;
@@ -108,6 +109,7 @@ int inc_ref(uint64 pa)
   return old + 1;
 }
 
+// same as above, but decrements.
 int dec_ref(uint64 pa)
 {
   int old;

@@ -8,7 +8,6 @@
 
 struct spinlock tickslock;
 uint ticks;
-int handle_page_fault(pagetable_t pagetable, uint64 va);
 
 extern char trampoline[], uservec[], userret[];
 
@@ -65,13 +64,13 @@ void usertrap(void)
 
     syscall();
   }
+  
   else if (r_scause() == 13 || r_scause() == 15)
   {
-    uint64 start_va = r_stval();
-    if (start_va >= p->sz || handle_page_fault(p->pagetable, PGROUNDDOWN(start_va) != 0))
-    {
+    uint64 va = r_stval();
+    // dealing only with copy on write page faults!!
+    if (va >= p->sz || copy_on_write(p->pagetable, va) != 0)
       p->killed = 1;
-    }
   }
   else if ((which_dev = devintr()) != 0)
   {
@@ -233,56 +232,5 @@ int devintr()
   else
   {
     return 0;
-  }
-}
-
-// this function handles a page fault
-// returns -1 = on page fault that shouldn't happend
-// returns 1 = page fault happend as a result of protection violation
-// returns 0 = as a result of cow page fault
-int handle_page_fault(pagetable_t pagetable, uint64 va)
-{
-  pte_t *pte;
-  char *new_pa;
-
-  if (va >= MAXVA)
-    return -1;
-
-  pte = walk(pagetable, va, 0);
-  if (!pte)
-    return -1;
-
-  // page isn't valid
-  if (!(*pte & PTE_V))
-    return -1;
-
-  // the faulted page wasn't a cow page
-  if (!(*pte & PTE_COW))
-    return -1;
-
-  // otherwise the faulted page occured because of an attempt to write on a cow page
-
-  // allocating a new physical page, copying all content and setting updated flags
-  if ((new_pa = kalloc()))
-  {
-    uint64 pa = PTE2PA(*pte);
-    // copying to new allocated page the previous page
-    memmove(new_pa, (void *)pa, PGSIZE);
-
-    // updating flags
-    uint flags = PTE_FLAGS(*pte);
-    flags |= PTE_W;
-    flags &= (~PTE_COW);
-    // updating page table entry
-    *pte = PA2PTE(new_pa) | flags;
-
-    // decrementing ref count on previous physical address (or freeing if ref count=0)
-    kfree((void *)pa);
-
-    return 0;
-  }
-  else
-  {
-    return -1;
   }
 }
